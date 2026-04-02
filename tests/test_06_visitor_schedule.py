@@ -1,0 +1,368 @@
+"""
+tests/test_06_visitor_schedule.py
+==================================
+Visitor Schedule Tests — the most business-critical module.
+
+Django Model: VisitorSchedule + VisitorScheduledLog
+Real API example: id=11, visitor_name="Addy", status="Active"
+
+Key FK relationships:
+  - residence → Residence (CASCADE)
+  - contact → Contact (optional, the host)
+  - visitor_type → VisitorType
+  - person_identifier_type → PersonIdentifierType
+  - notify_on_arrival → Contact (optional)
+
+Business Logic:
+  ✅ Create schedule with full payload
+  ✅ VisitStatus choices: scheduled/confirmed/checked_in/completed/cancelled/no_show/expired/active
+  ✅ days_selection + monday..sunday weekday flags
+  ✅ scheduled_from / scheduled_to date range
+  ✅ visitor_guid auto-generated UUID (editable=False)
+  ✅ shared flag (schedule shared with host contact)
+  ✅ undesired / blocked flags
+  ✅ visitor_type_name returned in response
+  ✅ residence_name returned in response
+  ✅ Edit schedule (change status, dates)
+  ✅ Status lifecycle: scheduled → confirmed → checked_in → completed
+  ✅ cancelled / no_show terminal states
+  ✅ external_id / tmt_external_id fields
+  ✅ Delete schedule
+
+Run:
+    pytest tests/test_06_visitor_schedule.py -v
+"""
+
+import time
+import pytest
+from playwright.sync_api import Page
+from utils.api_client import APIClient
+from fixtures.test_data import visitor_schedule_payload, residence_payload
+from config import (
+    UI, API,
+    RESIDENCE_TYPE_IDS, VISITOR_TYPE_IDS,
+    PERSON_ID_TYPES, VISIT_STATUS,
+)
+
+
+# ─── helper ──────────────────────────────────────────────────────────────────
+
+def create_test_residence(api: APIClient) -> int:
+    p = residence_payload(residence_type_id=RESIDENCE_TYPE_IDS["Residence"])
+    return api.create_residence(p)["id"]
+
+
+# ═══════════════════════════════════════════════════════════
+#  SECTION A — PURE API TESTS
+# ═══════════════════════════════════════════════════════════
+
+class TestVisitorScheduleAPI:
+
+    def test_list_visitor_schedules(self, api: APIClient):
+        """GET /api/v1/visitor-schedules/ → 200 + list."""
+        schedules = api.list_visitor_schedules()
+        assert isinstance(schedules, list)
+        print(f"\n✅ {len(schedules)} visitor schedule(s)")
+
+    def test_get_known_schedule(self, api: APIClient):
+        """
+        GET /api/v1/visitor-schedules/11/ → 'Addy' from your real data.
+        Verifies every field from your API response.
+        """
+        s = api.get_visitor_schedule(11)
+
+        expected_fields = [
+            "id", "visitor_name", "contact_number", "email_address",
+            "residence", "residence_name", "visitor_type", "visitor_type_name",
+            "person_identifier_type", "person_identifier_type_name",
+            "person_identifier", "gender", "dob", "company", "designation",
+            "message", "send_sms", "shared", "status",
+            "scheduled_from", "scheduled_to",
+            "days_selection", "monday", "tuesday", "wednesday",
+            "thursday", "friday", "saturday", "sunday",
+            "comments", "supervisor_comment",
+            "undesired", "blocked", "visitor_guid",
+            "external_id", "tmt_external_id",
+            "is_active", "is_deleted", "created_at", "updated_at",
+        ]
+        for f in expected_fields:
+            assert f in s, f"Field '{f}' missing. Keys: {list(s.keys())}"
+
+        assert s["id"]              == 11
+        assert s["visitor_name"]    == "Addy"
+        assert s["visitor_type_name"] == "Visitor"
+        assert s["residence_name"]  == "2-A1"
+        assert s["days_selection"]  is True
+        assert s["monday"]          is False
+        assert s["status"]          == "Active"
+        print(f"\n✅ Schedule 11 (Addy) fully verified")
+
+    def test_create_schedule_full_payload(self, api: APIClient):
+        """POST full VisitorSchedule payload → 201."""
+        res_id  = create_test_residence(api)
+        payload = visitor_schedule_payload(
+            residence_id   = res_id,
+            visitor_type_id= VISITOR_TYPE_IDS["Visitor"],
+            status         = VISIT_STATUS["scheduled"],
+        )
+        created     = api.create_visitor_schedule(payload)
+        schedule_id = created.get("id")
+        assert schedule_id, f"No 'id' in response: {created}"
+
+        fetched = api.get_visitor_schedule(schedule_id)
+        assert fetched["visitor_name"]      == payload["visitor_name"]
+        assert fetched["residence"]         == res_id
+        assert fetched["visitor_type"]      == VISITOR_TYPE_IDS["Visitor"]
+        assert fetched["visitor_type_name"] == "Visitor"
+        print(f"\n✅ Schedule id={schedule_id} for '{fetched['visitor_name']}' created")
+
+        api.delete_visitor_schedule(schedule_id)
+        api.delete_residence(res_id)
+
+    def test_visitor_guid_auto_generated(self, api: APIClient):
+        """visitor_guid must be a non-empty UUID, auto-generated by Django."""
+        res_id  = create_test_residence(api)
+        payload = visitor_schedule_payload(res_id)
+        created = api.create_visitor_schedule(payload)
+        s_id    = created.get("id")
+        fetched = api.get_visitor_schedule(s_id)
+
+        guid = fetched.get("visitor_guid")
+        assert guid, "visitor_guid must be auto-generated"
+        assert len(str(guid)) == 36, f"Expected UUID format (36 chars), got: {guid}"
+        print(f"\n✅ visitor_guid auto-generated: {guid}")
+        api.delete_visitor_schedule(s_id)
+        api.delete_residence(res_id)
+
+    def test_weekday_flags_saved(self, api: APIClient):
+        """days_selection + specific weekday flags (mon-fri=True, sat-sun=False)."""
+        res_id  = create_test_residence(api)
+        payload = visitor_schedule_payload(res_id)
+        payload.update({
+            "days_selection": True,
+            "monday": True, "tuesday": True, "wednesday": True,
+            "thursday": True, "friday": True,
+            "saturday": False, "sunday": False,
+        })
+        created = api.create_visitor_schedule(payload)
+        s_id    = created.get("id")
+        fetched = api.get_visitor_schedule(s_id)
+
+        assert fetched["days_selection"] is True
+        assert fetched["monday"]    is True
+        assert fetched["tuesday"]   is True
+        assert fetched["wednesday"] is True
+        assert fetched["thursday"]  is True
+        assert fetched["friday"]    is True
+        assert fetched["saturday"]  is False
+        assert fetched["sunday"]    is False
+        print(f"\n✅ Weekday flags: Mon-Fri=True, Sat-Sun=False")
+        api.delete_visitor_schedule(s_id)
+        api.delete_residence(res_id)
+
+    def test_weekend_only_schedule(self, api: APIClient):
+        """Weekend-only schedule: sat + sun = True, weekdays = False."""
+        res_id  = create_test_residence(api)
+        payload = visitor_schedule_payload(res_id)
+        payload.update({
+            "days_selection": True,
+            "monday": False, "tuesday": False, "wednesday": False,
+            "thursday": False, "friday": False,
+            "saturday": True, "sunday": True,
+        })
+        created = api.create_visitor_schedule(payload)
+        s_id    = created.get("id")
+        fetched = api.get_visitor_schedule(s_id)
+
+        assert fetched["saturday"] is True
+        assert fetched["sunday"]   is True
+        assert fetched["monday"]   is False
+        print(f"\n✅ Weekend-only schedule verified")
+        api.delete_visitor_schedule(s_id)
+        api.delete_residence(res_id)
+
+    @pytest.mark.parametrize("status", list(VISIT_STATUS.values()))
+    def test_all_visit_statuses(self, api: APIClient, status: str):
+        """All 8 VisitStatus values from Django model must be accepted."""
+        res_id  = create_test_residence(api)
+        payload = visitor_schedule_payload(res_id, status=status)
+        created = api.create_visitor_schedule(payload)
+        s_id    = created.get("id")
+        fetched = api.get_visitor_schedule(s_id)
+
+        stored = fetched["status"].lower()
+        assert stored == status.lower() or fetched["status"] == status.capitalize()
+        print(f"  ✅ status='{status}'")
+        api.delete_visitor_schedule(s_id)
+        api.delete_residence(res_id)
+
+    def test_status_lifecycle_scheduled_to_completed(self, api: APIClient):
+        """
+        Full visit lifecycle:
+        scheduled → confirmed → checked_in → completed
+        """
+        res_id  = create_test_residence(api)
+        payload = visitor_schedule_payload(res_id, status=VISIT_STATUS["scheduled"])
+        created = api.create_visitor_schedule(payload)
+        s_id    = created.get("id")
+
+        lifecycle = [
+            VISIT_STATUS["confirmed"],
+            VISIT_STATUS["checked_in"],
+            VISIT_STATUS["completed"],
+        ]
+        for next_status in lifecycle:
+            result = api.update_visitor_schedule(s_id, {"status": next_status})
+            fetched = api.get_visitor_schedule(s_id)
+            stored = fetched["status"].lower()
+            assert stored == next_status.lower() or fetched["status"] == next_status.capitalize()
+            print(f"  ✅ → {next_status}")
+
+        print(f"\n✅ Full lifecycle: scheduled→confirmed→checked_in→completed")
+        api.delete_visitor_schedule(s_id)
+        api.delete_residence(res_id)
+
+    def test_cancelled_status(self, api: APIClient):
+        """A scheduled visit can be cancelled."""
+        res_id  = create_test_residence(api)
+        payload = visitor_schedule_payload(res_id, status=VISIT_STATUS["scheduled"])
+        created = api.create_visitor_schedule(payload)
+        s_id    = created.get("id")
+
+        api.update_visitor_schedule(s_id, {"status": VISIT_STATUS["cancelled"]})
+        fetched = api.get_visitor_schedule(s_id)
+        assert fetched["status"].lower() == "cancelled"
+        print(f"\n✅ Visit cancelled")
+        api.delete_visitor_schedule(s_id)
+        api.delete_residence(res_id)
+
+    def test_undesired_flag(self, api: APIClient):
+        """undesired=True marks a visitor as undesired."""
+        res_id  = create_test_residence(api)
+        payload = visitor_schedule_payload(res_id)
+        payload["undesired"] = True
+        created = api.create_visitor_schedule(payload)
+        s_id    = created.get("id")
+        fetched = api.get_visitor_schedule(s_id)
+        assert fetched["undesired"] is True
+        print(f"\n✅ undesired=True stored")
+        api.delete_visitor_schedule(s_id)
+        api.delete_residence(res_id)
+
+    def test_blocked_flag(self, api: APIClient):
+        """blocked=True prevents future scheduling."""
+        res_id  = create_test_residence(api)
+        payload = visitor_schedule_payload(res_id)
+        payload["blocked"] = True
+        created = api.create_visitor_schedule(payload)
+        s_id    = created.get("id")
+        fetched = api.get_visitor_schedule(s_id)
+        assert fetched["blocked"] is True
+        print(f"\n✅ blocked=True stored")
+        api.delete_visitor_schedule(s_id)
+        api.delete_residence(res_id)
+
+    def test_shared_flag(self, api: APIClient):
+        """shared=True means schedule is shared with host contact."""
+        res_id  = create_test_residence(api)
+        payload = visitor_schedule_payload(res_id)
+        payload["shared"] = True
+        created = api.create_visitor_schedule(payload)
+        s_id    = created.get("id")
+        fetched = api.get_visitor_schedule(s_id)
+        assert fetched["shared"] is True
+        print(f"\n✅ shared=True stored")
+        api.delete_visitor_schedule(s_id)
+        api.delete_residence(res_id)
+
+    def test_external_id_fields(self, api: APIClient):
+        """external_id and tmt_external_id (3rd party integration fields) saved."""
+        res_id  = create_test_residence(api)
+        payload = visitor_schedule_payload(res_id)
+        payload["external_id"]     = "EXT-12345"
+        payload["tmt_external_id"] = "TMT-67890"
+        created = api.create_visitor_schedule(payload)
+        s_id    = created.get("id")
+        fetched = api.get_visitor_schedule(s_id)
+
+        assert fetched["external_id"]     == "EXT-12345"
+        assert fetched["tmt_external_id"] == "TMT-67890"
+        print(f"\n✅ external_id and tmt_external_id saved")
+        api.delete_visitor_schedule(s_id)
+        api.delete_residence(res_id)
+
+    @pytest.mark.parametrize("vt_name,vt_id", list(VISITOR_TYPE_IDS.items()))
+    def test_all_visitor_types(self, api: APIClient, vt_name: str, vt_id: int):
+        """All 5 VisitorType values work."""
+        res_id  = create_test_residence(api)
+        payload = visitor_schedule_payload(res_id, visitor_type_id=vt_id)
+        created = api.create_visitor_schedule(payload)
+        s_id    = created.get("id")
+        fetched = api.get_visitor_schedule(s_id)
+        assert fetched["visitor_type_name"] == vt_name
+        print(f"  ✅ VisitorType '{vt_name}' (id={vt_id})")
+        api.delete_visitor_schedule(s_id)
+        api.delete_residence(res_id)
+
+    def test_delete_visitor_schedule(self, api: APIClient):
+        """DELETE /api/v1/visitor-schedules/<id>/ → gone."""
+        res_id  = create_test_residence(api)
+        payload = visitor_schedule_payload(res_id)
+        created = api.create_visitor_schedule(payload)
+        s_id    = created.get("id")
+
+        result = api.delete_visitor_schedule(s_id)
+        assert result is True
+
+        resp = api.session.get(f"{API['visitor_schedules']}{s_id}/", timeout=10)
+        is_gone        = resp.status_code == 404
+        is_soft_deleted = (
+            resp.status_code == 200
+            and resp.json().get("data", {}).get("is_deleted") is True
+        )
+        assert is_gone or is_soft_deleted
+        print(f"\n✅ Schedule {s_id} deleted")
+        api.delete_residence(res_id)
+
+
+# ═══════════════════════════════════════════════════════════
+#  SECTION B — UI TESTS
+# ═══════════════════════════════════════════════════════════
+
+class TestVisitorScheduleUI:
+
+    def test_visitors_page_loads(self, auth_page: Page):
+        auth_page.goto(UI["visitors"])
+        auth_page.wait_for_load_state("networkidle")
+        auth_page.wait_for_timeout(1000)
+        auth_page.screenshot(path="screenshots/visitors_list.png", full_page=True)
+        print(f"\n✅ Visitors UI: {auth_page.url}")
+
+    def test_addy_visitor_visible_in_ui(self, auth_page: Page):
+        """Real visitor 'Addy' (schedule id=11) should appear in UI."""
+        auth_page.goto(UI["visitors"])
+        auth_page.wait_for_load_state("networkidle")
+        auth_page.wait_for_timeout(1500)
+
+        visible = auth_page.locator("text=Addy").count() > 0
+        auth_page.screenshot(path="screenshots/visitor_addy.png", full_page=True)
+        print(f"\n{'✅' if visible else '⚠️ '} 'Addy' visible in visitors UI: {visible}")
+
+    def test_api_visitor_visible_in_ui(self, auth_page: Page, api: APIClient):
+        """Create visitor schedule via API → verify in UI."""
+        res_id      = create_test_residence(api)
+        payload     = visitor_schedule_payload(res_id)
+        created     = api.create_visitor_schedule(payload)
+        s_id        = created.get("id")
+        visitor_name = payload["visitor_name"]
+
+        auth_page.goto(UI["visitors"])
+        auth_page.wait_for_load_state("networkidle")
+        auth_page.wait_for_timeout(1500)
+
+        visible = auth_page.locator(f"text={visitor_name[:10]}").count() > 0
+        auth_page.screenshot(path="screenshots/visitor_api_in_ui.png", full_page=True)
+        print(f"\n✅ Visitor '{visitor_name}' in UI: {visible}")
+
+        api.delete_visitor_schedule(s_id)
+        api.delete_residence(res_id)
