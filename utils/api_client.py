@@ -17,19 +17,33 @@ from config import API, SUPER_ADMIN, TIMEOUT
 class APIClient:
     """Thin wrapper around requests for your estate management API."""
 
-    def __init__(self, token: str = None):
-        self.session = requests.Session()
-        self.token   = token
+    def __init__(self, token: str = None, schema_name: str = None):
+        self.session     = requests.Session()
+        self.token       = token
+        self.schema_name = schema_name
         if token:
             self.session.headers.update({
                 "Authorization": f"Bearer {token}",
                 "Content-Type":  "application/json",
             })
+        if schema_name:
+            self.session.headers.update({"x-estate-schema": schema_name})
+
+    def set_schema(self, schema_name: str) -> "APIClient":
+        """Set (or update) the x-estate-schema header on all future requests."""
+        self.schema_name = schema_name
+        self.session.headers.update({"x-estate-schema": schema_name})
+        return self
 
     # ── Auth ──────────────────────────────────────────────────────────────────
 
     @classmethod
-    def login(cls, email: str = None, password: str = None) -> "APIClient":
+    def login(
+        cls,
+        email: str = None,
+        password: str = None,
+        schema_name: str = None,
+    ) -> "APIClient":
         """Login and return an authenticated APIClient instance."""
         email    = email    or SUPER_ADMIN["email"]
         password = password or SUPER_ADMIN["password"]
@@ -52,7 +66,7 @@ class APIClient:
             or body.get("data", {}).get("access_token")
         )
         assert token, f"Token not found in login response: {body}"
-        return cls(token=token)
+        return cls(token=token, schema_name=schema_name)
 
     # ── Estate (Super Admin scope) ────────────────────────────────────────────
 

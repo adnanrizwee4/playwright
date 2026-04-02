@@ -12,6 +12,7 @@ Google Chrome works confirmed:
 
 import os
 import json
+import threading
 import pytest
 from playwright.sync_api import Page, Browser, sync_playwright
 from typing import Dict, Any, Generator
@@ -47,55 +48,87 @@ def api() -> APIClient:
     return client
 
 
+# ── 1b. Schema-scoped API client (adds x-estate-schema header) ────────────────
+@pytest.fixture(scope="session")
+def schema_api(api: APIClient) -> APIClient:
+    """
+    Returns an APIClient with x-estate-schema set to the first active estate's
+    schema_name.  All tenant-scoped endpoints (resident-types, residences,
+    contacts, visitor-schedules, etc.) require this header.
+    """
+    estates = api.list_estates()
+    assert estates, "No estates found — create at least one estate first"
+    schema_name = estates[0]["schema_name"]
+    assert schema_name, f"Estate has no schema_name: {estates[0]}"
+
+    # Clone the session so the base `api` fixture stays without a schema header
+    client = APIClient(token=api.token, schema_name=schema_name)
+    print(f"\n🏢 Schema API ready — x-estate-schema: {schema_name}")
+    return client
+
+
 # ── 2. Auth state — own isolated browser, never touches test browser ──────────
 AUTH_FILE = "fixtures/.auth_state.json"
 
 @pytest.fixture(scope="session")
 def auth_state(api: APIClient) -> str:
     """
-    Launches its own browser via sync_playwright() — completely independent
-    from pytest-playwright's session browser used by tests.
-    Closes its own browser when done. Test browser is unaffected.
+    Runs sync_playwright() in a dedicated thread so it gets its own event loop
+    and doesn't conflict with pytest-playwright's asyncio loop.
     """
     os.makedirs("fixtures", exist_ok=True)
 
-    with sync_playwright() as pw:
-        browser = pw.chromium.launch(
-            executable_path=CHROME_EXE,
-            headless=True,
-            args=LAUNCH_ARGS,
-        )
-        ctx  = browser.new_context()
-        page = ctx.new_page()
-        page.set_default_timeout(TIMEOUT["navigation"])
+    state_holder: Dict[str, Any] = {}
+    error_holder:  Dict[str, Any] = {}
 
-        print(f"\n🌐 Logging in via Google Chrome...")
-        page.goto(UI["login"])
-        page.wait_for_load_state("networkidle")
+    def _login():
+        try:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(
+                    executable_path=CHROME_EXE,
+                    headless=True,
+                    args=LAUNCH_ARGS,
+                )
+                ctx  = browser.new_context()
+                page = ctx.new_page()
+                page.set_default_timeout(TIMEOUT["navigation"])
 
-        page.locator(
-            "input[formcontrolname='email'], input[type='email'], input[name='email']"
-        ).first.fill(SUPER_ADMIN["email"])
+                print(f"\n🌐 Logging in via Google Chrome (thread)...")
+                page.goto(UI["login"])
+                page.wait_for_load_state("networkidle")
 
-        page.locator(
-            "input[formcontrolname='password'], input[type='password']"
-        ).first.fill(SUPER_ADMIN["password"])
+                page.locator(
+                    "input[formcontrolname='email'], input[type='email'], input[name='email']"
+                ).first.fill(SUPER_ADMIN["email"])
 
-        page.locator(
-            "button[type='submit'], button:has-text('Login'), button:has-text('Sign In')"
-        ).first.click()
+                page.locator(
+                    "input[formcontrolname='password'], input[type='password']"
+                ).first.fill(SUPER_ADMIN["password"])
 
-        page.wait_for_url(
-            lambda url: "/login" not in url,
-            timeout=TIMEOUT["navigation"]
-        )
-        page.wait_for_load_state("networkidle")
+                page.locator(
+                    "button[type='submit'], button:has-text('Login'), button:has-text('Sign In')"
+                ).first.click()
 
-        state = ctx.storage_state()
-        with open(AUTH_FILE, "w") as f:
-            json.dump(state, f)
+                page.wait_for_url(
+                    lambda url: "/login" not in url,
+                    timeout=TIMEOUT["navigation"],
+                )
+                page.wait_for_load_state("networkidle")
 
-        browser.close()
+                state_holder["state"] = ctx.storage_state()
+                browser.close()
+        except Exception as exc:
+            error_holder["exc"] = exc
+
+    t = threading.Thread(target=_login, daemon=True)
+    t.start()
+    t.join(timeout=90)
+
+    if "exc" in error_holder:
+        raise error_holder["exc"]
+
+    with open(AUTH_FILE, "w") as f:
+        json.dump(state_holder["state"], f)
 
     print(f"✅ Auth state saved → {AUTH_FILE}")
     return AUTH_FILE
