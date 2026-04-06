@@ -122,6 +122,11 @@ GENDERS = ["male", "female", "other", "unspecified"]
 # Estate status choices
 ESTATE_STATUS = ["active", "inactive", "pending"]
 
+# ── Default estate schema for tenant-scoped tests ────────────────────────────
+# This schema contains the seeded test data (contact 14 "Avik Sen",
+# residence 7 "3-A1", visitor schedule 11 "Addy") used in known-entity tests.
+SCHEMA_NAME = "estate_rsh_signature"
+
 # ── Timeouts ──────────────────────────────────────────────────────────────────
 TIMEOUT = {
     "default":    12_000,

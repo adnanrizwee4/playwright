@@ -85,7 +85,7 @@ def residence_payload(
         "building_footprint_m2":    fake.random_int(min=50, max=200),
         "building_no_of_floors":    fake.random_int(min=1, max=10),
         "max_number_of_adults":     fake.random_int(min=2, max=10),
-        "max_number_of_minors":     fake.random_int(min=0, max=5),
+        "max_number_of_minors":     fake.random_int(min=1, max=5),
         "max_number_of_parking_bays": fake.random_int(min=1, max=4),
         "latitude":                 str(round(fake.latitude(), 4)),
         "longitude":                str(round(fake.longitude(), 4)),

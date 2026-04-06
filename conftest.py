@@ -17,7 +17,7 @@ import pytest
 from playwright.sync_api import Page, Browser, sync_playwright
 from typing import Dict, Any, Generator
 
-from config import UI, SUPER_ADMIN, TIMEOUT
+from config import UI, SUPER_ADMIN, TIMEOUT, SCHEMA_NAME
 from utils.api_client import APIClient
 
 
